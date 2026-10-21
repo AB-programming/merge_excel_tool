@@ -1,0 +1,11 @@
+# PyInstaller 产物
+build/
+dist/
+*.spec
+
+# 合并结果
+output/
+
+# Python
+__pycache__/
+*.pyc

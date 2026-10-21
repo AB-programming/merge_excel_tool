@@ -1,0 +1,12 @@
+# Excel 合并脚本依赖（已实测通过的版本）
+# 安装：pip install -r requirements.txt
+
+pandas==3.0.6        # 核心：读取、合并、写出
+openpyxl==3.1.5      # 读写 .xlsx / .xlsm
+xlrd==2.0.2          # 读取旧版 .xls（pandas 2.0+ 读 .xls 必需）
+numpy==2.5.3         # pandas 依赖
+python-dateutil==2.9.0.post0
+six==1.17.0
+
+# 可选：需要读取 .xlsb 二进制工作簿时才装
+# pyxlsb==1.0.10
