@@ -15,6 +15,7 @@ Excel 合并工具 —— 桌面端
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import os
 import queue
@@ -23,8 +24,10 @@ import sys
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, ttk
+from tkinter import filedialog, font as tkfont
 from tkinter.scrolledtext import ScrolledText
+
+import ttkbootstrap as ttk
 
 import merge_excel as core
 
@@ -36,6 +39,22 @@ MODES = (
 
 HOWS = ("left", "right", "outer", "inner")
 
+LIGHT_THEME = "bootstrap-light"
+DARK_THEME = "bootstrap-dark"
+
+
+def _system_prefers_dark() -> bool:
+    """读 Windows 个性化设置判断系统是否处于深色模式，失败时按浅色处理。"""
+    if sys.platform != "win32":
+        return False
+    try:
+        import winreg
+        key_path = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+            return winreg.QueryValueEx(key, "AppsUseLightTheme")[0] == 0
+    except OSError:
+        return False
+
 
 class QueueHandler(logging.Handler):
     """把日志文字塞进队列，由主线程取走显示（Tkinter 不能跨线程操作控件）。"""
@@ -45,7 +64,7 @@ class QueueHandler(logging.Handler):
         self.sink = sink
 
     def emit(self, record: logging.LogRecord) -> None:
-        self.sink.put(("log", self.format(record)))
+        self.sink.put(("log", record.levelname, self.format(record)))
 
 
 def reveal_in_folder(path: Path) -> None:
@@ -58,27 +77,106 @@ def reveal_in_folder(path: Path) -> None:
 
 
 class MergeApp:
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(self, root: ttk.Window) -> None:
         self.root = root
+        self.style = root.style
         self.sink: queue.Queue = queue.Queue()
         self.worker: threading.Thread | None = None
         self.selected_files: tuple[str, ...] = ()
         self.last_output: Path | None = None
 
-        root.title("Excel 合并工具")
-        root.minsize(760, 620)
         root.columnconfigure(0, weight=1)
         root.rowconfigure(4, weight=1)
 
+        self.theme = self.style.theme_mode or "light"
+        self.dark_var = tk.BooleanVar(value=self.theme == "dark")
+        self._set_fonts()
+        self._sync_root_bg()
+
         self._build_ui()
         self._on_mode_change()
-        self._append("提示：把要合并的 Excel 放进同一个文件夹，选好文件夹和合并方式，点「开始合并」。")
+        self._append("提示：把要合并的 Excel 放进同一个文件夹，选好文件夹和合并方式，点「开始合并」。", "HINT")
+        root.bind("<<ThemeChanged>>", self._on_theme_changed)
         root.after(80, self._drain)
+        self._fit_to_content()
+
+    def _fit_to_content(self) -> None:
+        """按内容需要的高度定初始窗口大小，避免高 DPI 屏幕上内容被裁掉。"""
+        self.root.update_idletasks()
+        w = self.root.winfo_reqwidth() + 24
+        h = self.root.winfo_reqheight() + 20
+        w = min(w, int(self.root.winfo_screenwidth() * 0.9))
+        h = min(h, int(self.root.winfo_screenheight() * 0.9))
+        self.root.geometry(f"{w}x{h}")
+        self._apply_titlebar()
+
+    # ------------------------------------------------------------------ 主题
+
+    def _set_fonts(self) -> None:
+        """按屏幕 DPI 把默认字体放大到约 10.5 磅，主题切换后需要重新套用。"""
+        scale = float(self.root.tk.call("tk", "scaling")) or 1.333
+        body = -round(10.5 * scale)  # 负值表示像素，高分屏下等比放大
+        for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
+            try:
+                font = tkfont.nametofont(name)
+                font.configure(size=body)
+                if sys.platform == "win32":
+                    font.configure(family="Microsoft YaHei UI")
+            except tk.TclError:
+                pass
+
+    def _log_colors(self) -> dict:
+        """日志区配色直接取主题调色板，换主题时自动跟着变。"""
+        c = self.style.colors
+        return {"bg": c.inputbg, "fg": c.fg, "select": c.selectbg,
+                "INFO": c.fg, "WARNING": c.warning, "ERROR": c.danger, "HINT": c.success}
+
+    def _sync_root_bg(self) -> None:
+        """让 Tk 根窗口底色跟随主题，避免深色模式下露出一圈灰底。"""
+        self.root.configure(bg=self.style.colors.bg)
+
+    def _apply_titlebar(self) -> None:
+        """把 Windows 标题栏和 1 像素边框染成主题色，否则深色内容配白色标题栏很割裂。"""
+        if sys.platform != "win32":
+            return
+        try:
+            hwnd = int(self.root.wm_frame(), 16)
+        except (tk.TclError, ValueError):
+            return
+        dark = ctypes.c_int(1 if self.theme == "dark" else 0)
+        try:
+            dwm = ctypes.windll.dwmapi
+            for attr in (20, 19):  # Win11 用 20，旧版 Win10 用 19，不支持的会被系统忽略
+                dwm.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(dark), ctypes.sizeof(dark))
+            # Win11 22000+：窗口边框也染成主题底色（BGR 顺序的 COLORREF）
+            bg = self.style.colors.bg
+            colorref = ctypes.c_int(int(bg[5:7] + bg[3:5] + bg[1:3], 16))
+            dwm.DwmSetWindowAttribute(hwnd, 34, ctypes.byref(colorref), ctypes.sizeof(colorref))
+        except (AttributeError, OSError):
+            pass
+
+    def _toggle_theme(self) -> None:
+        self.style.theme_use(DARK_THEME if self.dark_var.get() else LIGHT_THEME)
+
+    def _on_theme_changed(self, event: tk.Event | None = None) -> None:
+        self.theme = self.style.theme_mode or "light"
+        self._set_fonts()
+        self._sync_root_bg()
+        self._style_log()
+        self._apply_titlebar()
+
+    def _style_log(self) -> None:
+        c = self._log_colors()
+        self.log_view.config(
+            bg=c["bg"], fg=c["fg"], insertbackground=c["fg"], selectbackground=c["select"]
+        )
+        for level in ("INFO", "WARNING", "ERROR", "HINT"):
+            self.log_view.tag_configure(level, foreground=c[level])
 
     # ------------------------------------------------------------------ 界面
 
     def _build_ui(self) -> None:
-        pad = {"padx": 10, "pady": 6}
+        pad = {"padx": 12, "pady": 8}
 
         # --- 输入 ---
         in_box = ttk.LabelFrame(self.root, text=" 输入 ")
@@ -95,10 +193,12 @@ class MergeApp:
         ttk.Entry(in_box, textvariable=self.input_var).grid(
             row=1, column=0, sticky="ew", padx=8
         )
-        ttk.Button(in_box, text="浏览…", command=self._choose_dir).grid(
+        ttk.Button(in_box, text="浏览…", bootstyle="secondary-outline",
+                   command=self._choose_dir).grid(
             row=0, column=1, rowspan=2, padx=8, pady=6, sticky="ns"
         )
-        ttk.Button(in_box, text="选几个文件…", command=self._choose_files).grid(
+        ttk.Button(in_box, text="选几个文件…", bootstyle="secondary-outline",
+                   command=self._choose_files).grid(
             row=0, column=2, rowspan=2, padx=(0, 8), pady=6, sticky="ns"
         )
         self.files_label.grid(row=2, column=0, columnspan=3, sticky="w", padx=8)
@@ -155,32 +255,42 @@ class MergeApp:
             opt_box, text="不添加「来源文件 / 来源工作表」标记列", variable=self.no_source_var
         )
         self.no_source_check.grid(row=1, column=0, columnspan=3, sticky="w", padx=10)
+        ttk.Checkbutton(
+            opt_box, text="深色模式", variable=self.dark_var,
+            bootstyle="success-round-toggle", command=self._toggle_theme,
+        ).grid(row=1, column=1, columnspan=2, sticky="e", padx=(0, 10))
 
         self.output_var = tk.StringVar(value=str(Path(os.getcwd()) / "output"))
         ttk.Label(opt_box, text="输出到：").grid(row=2, column=0, sticky="w", padx=10, pady=(8, 2))
         ttk.Entry(opt_box, textvariable=self.output_var).grid(
             row=3, column=0, sticky="ew", padx=10
         )
-        ttk.Button(opt_box, text="浏览…", command=self._choose_output).grid(
+        ttk.Button(opt_box, text="浏览…", bootstyle="secondary-outline",
+                   command=self._choose_output).grid(
             row=2, column=1, rowspan=2, padx=6, pady=8, sticky="ns"
         )
-        ttk.Button(opt_box, text="清空日志", command=self._clear_log).grid(
+        ttk.Button(opt_box, text="清空日志", bootstyle="secondary-outline",
+                   command=self._clear_log).grid(
             row=2, column=2, rowspan=2, padx=(0, 10), pady=8, sticky="ns"
         )
 
         # --- 执行 ---
         action = ttk.Frame(self.root)
         action.grid(row=3, column=0, sticky="ew", padx=10)
-        action.columnconfigure(1, weight=1)
-        self.run_button = ttk.Button(action, text="开始合并", command=self._start)
+        action.columnconfigure(2, weight=1)
+        self.run_button = ttk.Button(
+            action, text="开始合并", bootstyle="success", command=self._start
+        )
         self.run_button.grid(row=0, column=0, pady=4, sticky="w")
         self.open_button = ttk.Button(
-            action, text="打开结果所在文件夹", command=self._open_output, state="disabled"
+            action, text="打开结果所在文件夹", bootstyle="secondary-outline",
+            command=self._open_output, state="disabled",
         )
         self.open_button.grid(row=0, column=1, padx=8, pady=4, sticky="w")
+        self.progress = ttk.Progressbar(action, mode="indeterminate", bootstyle="success")
         self.status_var = tk.StringVar(value="就绪")
         ttk.Label(action, textvariable=self.status_var).grid(
-            row=0, column=2, pady=4, sticky="e"
+            row=0, column=3, pady=4, sticky="e"
         )
 
         # --- 日志 ---
@@ -188,8 +298,12 @@ class MergeApp:
         log_box.grid(row=4, column=0, sticky="nsew", **pad)
         log_box.columnconfigure(0, weight=1)
         log_box.rowconfigure(0, weight=1)
-        self.log_view = ScrolledText(log_box, height=14, wrap=tk.WORD, state="disabled")
+        self.log_view = ScrolledText(
+            log_box, height=12, wrap=tk.WORD, state="disabled",
+            relief="flat", borderwidth=0, font="TkTextFont",
+        )
         self.log_view.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+        self._style_log()
 
     # ------------------------------------------------------------ 界面事件
 
@@ -230,9 +344,10 @@ class MergeApp:
         self.log_view.delete("1.0", tk.END)
         self.log_view.config(state="disabled")
 
-    def _append(self, text: str) -> None:
+    def _append(self, text: str, level: str = "INFO") -> None:
+        tag = level if level in ("INFO", "WARNING", "ERROR", "HINT") else "INFO"
         self.log_view.config(state="normal")
-        self.log_view.insert(tk.END, text + "\n")
+        self.log_view.insert(tk.END, text + "\n", tag)
         self.log_view.see(tk.END)
         self.log_view.config(state="disabled")
 
@@ -268,13 +383,15 @@ class MergeApp:
             options = self.collect_options()
         except ValueError as exc:
             self.status_var.set("参数不完整")
-            self._append(f"[错误] {exc}")
+            self._append(f"[错误] {exc}", "ERROR")
             return
 
         self.last_output = None
         self.open_button.config(state="disabled")
         self.run_button.config(state="disabled")
         self.status_var.set("进行中…")
+        self.progress.grid(row=0, column=2, sticky="ew", padx=8)
+        self.progress.start(60)
         self.worker = threading.Thread(target=self._run, args=(options,), daemon=True)
         self.worker.start()
 
@@ -295,11 +412,11 @@ class MergeApp:
     def _drain(self) -> None:
         try:
             while True:
-                kind, payload = self.sink.get_nowait()
-                if kind == "log":
-                    self._append(payload)
+                item = self.sink.get_nowait()
+                if item[0] == "log":
+                    self._append(item[2], item[1])
                 else:
-                    self._finish(payload)
+                    self._finish(item[1])
         except queue.Empty:
             pass
         try:
@@ -308,6 +425,8 @@ class MergeApp:
             pass  # 窗口已关闭
 
     def _finish(self, outcome: core.MergeOutcome) -> None:
+        self.progress.stop()
+        self.progress.grid_remove()
         self.run_button.config(state="normal")
         self.last_output = outcome.output_path
         if outcome.output_path is not None:
@@ -323,7 +442,9 @@ class MergeApp:
 
 
 def launch() -> int:
-    root = tk.Tk()
+    theme = DARK_THEME if _system_prefers_dark() else LIGHT_THEME
+    # high_dpi 让 ttkbootstrap 自己处理高分辨率屏幕的缩放与清晰度
+    root = ttk.Window(title="Excel 合并工具", themename=theme, minsize=(860, 680), high_dpi=True)
     MergeApp(root)
     root.mainloop()
     return 0

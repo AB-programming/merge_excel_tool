@@ -17,11 +17,11 @@ echo [1/3] 准备 PyInstaller…
 if errorlevel 1 goto :fail
 
 echo [2/3] 打包桌面版（无黑窗口）…
-%PY% -m PyInstaller --noconfirm --clean --onefile --windowed --name "Excel合并工具" --hidden-import openpyxl --hidden-import xlrd gui.py
+%PY% -m PyInstaller --noconfirm --clean --onefile --windowed --name "Excel合并工具" --hidden-import openpyxl --hidden-import xlrd --collect-data ttkbootstrap gui.py
 if errorlevel 1 goto :fail
 
 echo [3/3] 打包命令行版…
-%PY% -m PyInstaller --noconfirm --clean --onefile --console --name "merge_excel" --hidden-import openpyxl --hidden-import xlrd --hidden-import gui merge_excel.py
+%PY% -m PyInstaller --noconfirm --clean --onefile --console --name "merge_excel" --hidden-import openpyxl --hidden-import xlrd --hidden-import gui --collect-data ttkbootstrap merge_excel.py
 if errorlevel 1 goto :fail
 
 echo.

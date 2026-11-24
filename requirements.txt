@@ -7,6 +7,7 @@ xlrd==2.0.2          # 读取旧版 .xls（pandas 2.0+ 读 .xls 必需）
 numpy==2.5.3         # pandas 依赖
 python-dateutil==2.9.0.post0
 six==1.17.0
+ttkbootstrap==2.2.7  # 桌面端界面主题（Bootstrap 风格，浅色/深色）
 
 # 可选：需要读取 .xlsb 二进制工作簿时才装
 # pyxlsb==1.0.10
